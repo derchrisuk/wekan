@@ -97,7 +97,8 @@ Template.dateBadge.helpers({
     return (
       Meteor.user() &&
       Meteor.user().isBoardMember() &&
-      !Meteor.user().isCommentOnly()
+      !Meteor.user().isCommentOnly() &&
+      !Meteor.user().isWorker()
     );
   },
 });
@@ -237,7 +238,7 @@ class CardReceivedDate extends CardDate {
     const theDate = this.date.get();
     // if dueAt, endAt and startAt exist & are > receivedAt, receivedAt doesn't need to be flagged
     if (
-      (startAt && theDate.isAfter(dueAt)) ||
+      (startAt && theDate.isAfter(startAt)) ||
       (endAt && theDate.isAfter(endAt)) ||
       (dueAt && theDate.isAfter(dueAt))
     )
@@ -344,9 +345,9 @@ class CardEndDate extends CardDate {
     let classes = 'end-date' + ' ';
     const dueAt = this.data().getDue();
     const theDate = this.date.get();
-    if (theDate.diff(dueAt, 'days') >= 2) classes += 'long-overdue';
-    else if (theDate.diff(dueAt, 'days') >= 0) classes += 'due';
-    else if (theDate.diff(dueAt, 'days') >= -2) classes += 'almost-due';
+    if (!dueAt) classes += '';
+    else if (theDate.isBefore(dueAt)) classes += 'current';
+    else if (theDate.isAfter(dueAt)) classes += 'due';
     return classes;
   }
 
@@ -385,3 +386,30 @@ CardEndDate.register('cardEndDate');
     return this.date.get().format('l');
   }
 }.register('minicardEndDate'));
+
+class VoteEndDate extends CardDate {
+  onCreated() {
+    super.onCreated();
+    const self = this;
+    self.autorun(() => {
+      self.date.set(moment(self.data().getVoteEnd()));
+    });
+  }
+  classes() {
+    const classes = 'end-date' + ' ';
+    return classes;
+  }
+  showDate() {
+    return this.date.get().format('l LT');
+  }
+  showTitle() {
+    return `${TAPi18n.__('card-end-on')} ${this.date.get().format('LLLL')}`;
+  }
+
+  events() {
+    return super.events().concat({
+      'click .js-edit-date': Popup.open('editVoteEndDate'),
+    });
+  }
+}
+VoteEndDate.register('voteEndDate');

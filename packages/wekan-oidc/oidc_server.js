@@ -9,7 +9,22 @@ OAuth.registerService('oidc', 2, null, function (query) {
   var accessToken = token.access_token || token.id_token;
   var expiresAt = (+new Date) + (1000 * parseInt(token.expires_in, 10));
 
-  var userinfo = getUserInfo(accessToken);
+  var claimsInAccessToken = (process.env.OAUTH2_ADFS_ENABLED === 'true' || process.env.OAUTH2_ADFS_ENABLED === true) || false;
+
+  var userinfo;
+  if(claimsInAccessToken)
+  {
+    // hack when using custom claims in the accessToken. On premise ADFS
+    userinfo = getTokenContent(accessToken);
+  }
+  else
+  {
+    // normal behaviour, getting the claims from UserInfo endpoint.
+    userinfo = getUserInfo(accessToken);
+  }
+
+  if (userinfo.ocs) userinfo = userinfo.ocs.data; // Nextcloud hack
+  if (userinfo.metadata) userinfo = userinfo.metadata // Openshift hack
   if (debug) console.log('XXX: userinfo:', userinfo);
 
   var serviceData = {};
@@ -18,7 +33,19 @@ OAuth.registerService('oidc', 2, null, function (query) {
   serviceData.fullname = userinfo[process.env.OAUTH2_FULLNAME_MAP]; // || userinfo["displayName"];
   serviceData.accessToken = accessToken;
   serviceData.expiresAt = expiresAt;
-  serviceData.email = userinfo[process.env.OAUTH2_EMAIL_MAP]; // || userinfo["email"];
+
+  // If on Oracle OIM email is empty or null, get info from username
+  if (process.env.ORACLE_OIM_ENABLED === 'true' || process.env.ORACLE_OIM_ENABLED === true) {
+    if (userinfo[process.env.OAUTH2_EMAIL_MAP]) {
+      serviceData.email = userinfo[process.env.OAUTH2_EMAIL_MAP];
+    } else {
+      serviceData.email = userinfo[process.env.OAUTH2_USERNAME_MAP];
+    }
+  }
+
+  if (process.env.ORACLE_OIM_ENABLED !== 'true' && process.env.ORACLE_OIM_ENABLED !== true) {
+    serviceData.email = userinfo[process.env.OAUTH2_EMAIL_MAP]; // || userinfo["email"];
+  }
 
   if (accessToken) {
     var tokenContent = getTokenContent(accessToken);
@@ -46,48 +73,108 @@ if (Meteor.release) {
   userAgent += "/" + Meteor.release;
 }
 
-var getToken = function (query) {
-  var debug = process.env.DEBUG || false;
-  var config = getConfiguration();
-  if(config.tokenEndpoint.includes('https://')){
-    var serverTokenEndpoint = config.tokenEndpoint;
-  }else{
-    var serverTokenEndpoint = config.serverUrl + config.tokenEndpoint;
-  }
-  var requestPermissions = config.requestPermissions;
-  var response;
+if (process.env.ORACLE_OIM_ENABLED !== 'true' && process.env.ORACLE_OIM_ENABLED !== true) {
+  var getToken = function (query) {
+    var debug = process.env.DEBUG || false;
+    var config = getConfiguration();
+    if(config.tokenEndpoint.includes('https://')){
+      var serverTokenEndpoint = config.tokenEndpoint;
+    }else{
+      var serverTokenEndpoint = config.serverUrl + config.tokenEndpoint;
+    }
+    var requestPermissions = config.requestPermissions;
+    var response;
 
-  try {
-    response = HTTP.post(
-      serverTokenEndpoint,
-      {
-        headers: {
-          Accept: 'application/json',
-          "User-Agent": userAgent
-        },
-        params: {
-          code: query.code,
-          client_id: config.clientId,
-          client_secret: OAuth.openSecret(config.secret),
-          redirect_uri: OAuth._redirectUri('oidc', config),
-          grant_type: 'authorization_code',
-          scope: requestPermissions,
-          state: query.state
+    try {
+      response = HTTP.post(
+        serverTokenEndpoint,
+        {
+          headers: {
+            Accept: 'application/json',
+            "User-Agent": userAgent
+          },
+          params: {
+            code: query.code,
+            client_id: config.clientId,
+            client_secret: OAuth.openSecret(config.secret),
+            redirect_uri: OAuth._redirectUri('oidc', config),
+            grant_type: 'authorization_code',
+            state: query.state
+          }
         }
-      }
-    );
-  } catch (err) {
-    throw _.extend(new Error("Failed to get token from OIDC " + serverTokenEndpoint + ": " + err.message),
-      { response: err.response });
-  }
-  if (response.data.error) {
-    // if the http response was a json object with an error attribute
-    throw new Error("Failed to complete handshake with OIDC " + serverTokenEndpoint + ": " + response.data.error);
-  } else {
-    if (debug) console.log('XXX: getToken response: ', response.data);
-    return response.data;
-  }
-};
+      );
+    } catch (err) {
+      throw _.extend(new Error("Failed to get token from OIDC " + serverTokenEndpoint + ": " + err.message),
+        { response: err.response });
+    }
+    if (response.data.error) {
+      // if the http response was a json object with an error attribute
+      throw new Error("Failed to complete handshake with OIDC " + serverTokenEndpoint + ": " + response.data.error);
+    } else {
+      if (debug) console.log('XXX: getToken response: ', response.data);
+      return response.data;
+    }
+  };
+}
+
+if (process.env.ORACLE_OIM_ENABLED === 'true' || process.env.ORACLE_OIM_ENABLED === true) {
+
+  var getToken = function (query) {
+    var debug = (process.env.DEBUG === 'true' || process.env.DEBUG === true) || false;
+    var config = getConfiguration();
+    if(config.tokenEndpoint.includes('https://')){
+      var serverTokenEndpoint = config.tokenEndpoint;
+    }else{
+      var serverTokenEndpoint = config.serverUrl + config.tokenEndpoint;
+    }
+    var requestPermissions = config.requestPermissions;
+    var response;
+
+    // OIM needs basic Authentication token in the header - ClientID + SECRET in base64
+    var dataToken=null;
+    var strBasicToken=null;
+    var strBasicToken64=null;
+
+    dataToken = process.env.OAUTH2_CLIENT_ID + ':' + process.env.OAUTH2_SECRET;
+    strBasicToken = new Buffer(dataToken);
+    strBasicToken64 = strBasicToken.toString('base64');
+
+    // eslint-disable-next-line no-console
+    if (debug) console.log('Basic Token: ', strBasicToken64);
+
+    try {
+      response = HTTP.post(
+        serverTokenEndpoint,
+        {
+          headers: {
+            Accept: 'application/json',
+            "User-Agent": userAgent,
+            "Authorization": "Basic " + strBasicToken64
+          },
+          params: {
+            code: query.code,
+            client_id: config.clientId,
+            client_secret: OAuth.openSecret(config.secret),
+            redirect_uri: OAuth._redirectUri('oidc', config),
+            grant_type: 'authorization_code',
+            state: query.state
+          }
+        }
+      );
+    } catch (err) {
+      throw _.extend(new Error("Failed to get token from OIDC " + serverTokenEndpoint + ": " + err.message),
+        { response: err.response });
+    }
+    if (response.data.error) {
+      // if the http response was a json object with an error attribute
+      throw new Error("Failed to complete handshake with OIDC " + serverTokenEndpoint + ": " + response.data.error);
+    } else {
+      // eslint-disable-next-line no-console
+      if (debug) console.log('XXX: getToken response: ', response.data);
+      return response.data;
+    }
+  };
+}
 
 var getUserInfo = function (accessToken) {
   var debug = process.env.DEBUG || false;
@@ -131,9 +218,9 @@ var getTokenContent = function (token) {
   if (token) {
     try {
       var parts = token.split('.');
-      var header = JSON.parse(new Buffer(parts[0], 'base64').toString());
-      content = JSON.parse(new Buffer(parts[1], 'base64').toString());
-      var signature = new Buffer(parts[2], 'base64');
+      var header = JSON.parse(Buffer.from(parts[0], 'base64').toString());
+      content = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+      var signature = Buffer.from(parts[2], 'base64');
       var signed = parts[0] + '.' + parts[1];
     } catch (err) {
       this.content = {

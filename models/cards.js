@@ -205,7 +205,8 @@ Cards.attachSchema(
     },
     assignees: {
       /**
-       * who assignees of the card (user IDs)
+       * who is assignee of the card (user ID),
+       * maximum one ID of assignee in array.
        */
       type: [String],
       optional: true,
@@ -277,7 +278,7 @@ Cards.attachSchema(
        */
       type: Number,
       decimal: true,
-      defaultValue: '',
+      defaultValue: 0,
     },
     subtaskSort: {
       /**
@@ -303,6 +304,46 @@ Cards.attachSchema(
       optional: true,
       defaultValue: '',
     },
+    vote: {
+      /**
+       * vote object, see below
+       */
+      type: Object,
+      optional: true,
+    },
+    'vote.question': {
+      type: String,
+      defaultValue: '',
+    },
+    'vote.positive': {
+      /**
+       * list of members (user IDs)
+       */
+      type: [String],
+      optional: true,
+      defaultValue: [],
+    },
+    'vote.negative': {
+      /**
+       * list of members (user IDs)
+       */
+      type: [String],
+      optional: true,
+      defaultValue: [],
+    },
+    'vote.end': {
+      type: Date,
+      optional: true,
+      defaultValue: null,
+    },
+    'vote.public': {
+      type: Boolean,
+      defaultValue: false,
+    },
+    'vote.allowNonBoardMembers': {
+      type: Boolean,
+      defaultValue: false,
+    },
   }),
 );
 
@@ -310,8 +351,14 @@ Cards.allow({
   insert(userId, doc) {
     return allowIsBoardMember(userId, Boards.findOne(doc.boardId));
   },
-  update(userId, doc) {
-    return allowIsBoardMember(userId, Boards.findOne(doc.boardId));
+
+  update(userId, doc, fields) {
+    // Allow board members or logged in users if only vote get's changed
+    return (
+      allowIsBoardMember(userId, Boards.findOne(doc.boardId)) ||
+      (_.isEqual(fields, ['vote', 'modifiedAt', 'dateLastActivity']) &&
+        !!userId)
+    );
   },
   remove(userId, doc) {
     return allowIsBoardMember(userId, Boards.findOne(doc.boardId));
@@ -321,30 +368,36 @@ Cards.allow({
 
 Cards.helpers({
   copy(boardId, swimlaneId, listId) {
-    const oldBoard = Boards.findOne(this.boardId);
-    const oldBoardLabels = oldBoard.labels;
-    // Get old label names
-    const oldCardLabels = _.pluck(
-      _.filter(oldBoardLabels, label => {
-        return _.contains(this.labelIds, label._id);
-      }),
-      'name',
-    );
-
-    const newBoard = Boards.findOne(boardId);
-    const newBoardLabels = newBoard.labels;
-    const newCardLabels = _.pluck(
-      _.filter(newBoardLabels, label => {
-        return _.contains(oldCardLabels, label.name);
-      }),
-      '_id',
-    );
-
     const oldId = this._id;
     const oldCard = Cards.findOne(oldId);
 
-    // Copy Custom Fields
-    if (oldBoard._id !== boardId) {
+    // we must only copy the labels and custom fields if the target board
+    // differs from the source board
+    if (this.boardId !== boardId) {
+      const oldBoard = Boards.findOne(this.boardId);
+      const oldBoardLabels = oldBoard.labels;
+
+      // Get old label names
+      const oldCardLabels = _.pluck(
+        _.filter(oldBoardLabels, label => {
+          return _.contains(this.labelIds, label._id);
+        }),
+        'name',
+      );
+
+      const newBoard = Boards.findOne(boardId);
+      const newBoardLabels = newBoard.labels;
+      const newCardLabels = _.pluck(
+        _.filter(newBoardLabels, label => {
+          return _.contains(oldCardLabels, label.name);
+        }),
+        '_id',
+      );
+      // now set the new label ids
+      delete this.labelIds;
+      this.labelIds = newCardLabels;
+
+      // Copy Custom Fields
       CustomFields.find({
         _id: {
           $in: oldCard.customFields.map(cf => {
@@ -357,8 +410,6 @@ Cards.helpers({
     }
 
     delete this._id;
-    delete this.labelIds;
-    this.labelIds = newCardLabels;
     this.boardId = boardId;
     this.swimlaneId = swimlaneId;
     this.listId = listId;
@@ -389,6 +440,21 @@ Cards.helpers({
     });
 
     return _id;
+  },
+
+  link(boardId, swimlaneId, listId) {
+    // TODO is there a better method to create a deepcopy?
+    linkCard = JSON.parse(JSON.stringify(this));
+    // TODO is this how it is meant to be?
+    linkCard.linkedId = linkCard.linkedId || linkCard._id;
+    linkCard.boardId = boardId;
+    linkCard.swimlaneId = swimlaneId;
+    linkCard.listId = listId;
+    linkCard.type = 'cardType-linkedCard';
+    delete linkCard._id;
+    // TODO shall we copy the labels for a linked card?!
+    delete linkCard.labelIds;
+    return Cards.insert(linkCard);
   },
 
   list() {
@@ -468,6 +534,7 @@ Cards.helpers({
   },
 
   cover() {
+    if (!this.coverId) return false;
     const cover = Attachments.findOne(this.coverId);
     // if we return a cover before it is fully stored, we will get errors when we try to display it
     // todo XXX we could return a default "upload pending" image in the meantime?
@@ -763,7 +830,7 @@ Cards.helpers({
       return card.assignees;
     } else if (this.isLinkedBoard()) {
       const board = Boards.findOne({ _id: this.linkedId });
-      return board.activeAssignees().map(assignee => {
+      return board.activeMembers().map(assignee => {
         return assignee.userId;
       });
     } else {
@@ -979,6 +1046,88 @@ Cards.helpers({
     }
   },
 
+  getVoteQuestion() {
+    if (this.isLinkedCard()) {
+      const card = Cards.findOne({ _id: this.linkedId });
+      if (card && card.vote) return card.vote.question;
+      else return null;
+    } else if (this.isLinkedBoard()) {
+      const board = Boards.findOne({ _id: this.linkedId });
+      if (board && board.vote) return board.vote.question;
+      else return null;
+    } else if (this.vote) {
+      return this.vote.question;
+    } else {
+      return null;
+    }
+  },
+
+  getVotePublic() {
+    if (this.isLinkedCard()) {
+      const card = Cards.findOne({ _id: this.linkedId });
+      if (card && card.vote) return card.vote.public;
+      else return null;
+    } else if (this.isLinkedBoard()) {
+      const board = Boards.findOne({ _id: this.linkedId });
+      if (board && board.vote) return board.vote.public;
+      else return null;
+    } else if (this.vote) {
+      return this.vote.public;
+    } else {
+      return null;
+    }
+  },
+
+  getVoteEnd() {
+    if (this.isLinkedCard()) {
+      const card = Cards.findOne({ _id: this.linkedId });
+      if (card && card.vote) return card.vote.end;
+      else return null;
+    } else if (this.isLinkedBoard()) {
+      const board = Boards.findOne({ _id: this.linkedId });
+      if (board && board.vote) return board.vote.end;
+      else return null;
+    } else if (this.vote) {
+      return this.vote.end;
+    } else {
+      return null;
+    }
+  },
+  expiredVote() {
+    let end = this.getVoteEnd();
+    if (end) {
+      end = moment(end);
+      return end.isBefore(new Date());
+    }
+    return false;
+  },
+  voteMemberPositive() {
+    if (this.vote && this.vote.positive)
+      return Users.find({ _id: { $in: this.vote.positive } });
+    return [];
+  },
+
+  voteMemberNegative() {
+    if (this.vote && this.vote.negative)
+      return Users.find({ _id: { $in: this.vote.negative } });
+    return [];
+  },
+  voteState() {
+    const userId = Meteor.userId();
+    let state;
+    if (this.vote) {
+      if (this.vote.positive) {
+        state = _.contains(this.vote.positive, userId);
+        if (state === true) return true;
+      }
+      if (this.vote.negative) {
+        state = _.contains(this.vote.negative, userId);
+        if (state === true) return false;
+      }
+    }
+    return null;
+  },
+
   getId() {
     if (this.isLinked()) {
       return this.linkedId;
@@ -1072,6 +1221,26 @@ Cards.helpers({
   isTemplateCard() {
     return this.type === 'template-card';
   },
+
+  votePublic() {
+    if (this.vote) return this.vote.public;
+    return null;
+  },
+  voteAllowNonBoardMembers() {
+    if (this.vote) return this.vote.allowNonBoardMembers;
+    return null;
+  },
+  voteCountNegative() {
+    if (this.vote && this.vote.negative) return this.vote.negative.length;
+    return null;
+  },
+  voteCountPositive() {
+    if (this.vote && this.vote.positive) return this.vote.positive.length;
+    return null;
+  },
+  voteCount() {
+    return this.voteCountPositive() + this.voteCountNegative();
+  },
 });
 
 Cards.mutations({
@@ -1105,9 +1274,83 @@ Cards.mutations({
     };
   },
 
+  moveToEndOfList({ listId } = {}) {
+    let swimlaneId = this.swimlaneId;
+    const boardId = this.boardId;
+    let sortIndex = 0;
+
+    // This should never happen, but there was a bug that was fixed in commit
+    // ea0239538a68e225c867411a4f3e0d27c158383.
+    if (!swimlaneId) {
+      const board = Boards.findOne(boardId);
+      swimlaneId = board.getDefaultSwimline()._id;
+    }
+    // Move the minicard to the end of the target list
+    let parentElementDom = $(`#swimlane-${this.swimlaneId}`).get(0);
+    if (!parentElementDom) parentElementDom = $(':root');
+
+    const lastCardDom = $(parentElementDom)
+      .find(`#js-list-${listId} .js-minicard:last`)
+      .get(0);
+    if (lastCardDom) sortIndex = Utils.calculateIndex(lastCardDom, null).base;
+
+    return this.moveOptionalArgs({
+      boardId,
+      swimlaneId,
+      listId,
+      sort: sortIndex,
+    });
+  },
+
+  moveOptionalArgs({ boardId, swimlaneId, listId, sort } = {}) {
+    boardId = boardId || this.boardId;
+    swimlaneId = swimlaneId || this.swimlaneId;
+    // This should never happen, but there was a bug that was fixed in commit
+    // ea0239538a68e225c867411a4f3e0d27c158383.
+    if (!swimlaneId) {
+      const board = Boards.findOne(boardId);
+      swimlaneId = board.getDefaultSwimline()._id;
+    }
+    listId = listId || this.listId;
+    if (sort === undefined || sort === null) sort = this.sort;
+    return this.move(boardId, swimlaneId, listId, sort);
+  },
+
   move(boardId, swimlaneId, listId, sort) {
-    // Copy Custom Fields
+    const mutatedFields = {
+      boardId,
+      swimlaneId,
+      listId,
+      sort,
+    };
+
+    // we must only copy the labels and custom fields if the target board
+    // differs from the source board
     if (this.boardId !== boardId) {
+      // Get label names
+      const oldBoard = Boards.findOne(this.boardId);
+      const oldBoardLabels = oldBoard.labels;
+      const oldCardLabels = _.pluck(
+        _.filter(oldBoardLabels, label => {
+          return _.contains(this.labelIds, label._id);
+        }),
+        'name',
+      );
+
+      const newBoard = Boards.findOne(boardId);
+      const newBoardLabels = newBoard.labels;
+      const newCardLabelIds = _.pluck(
+        _.filter(newBoardLabels, label => {
+          return label.name && _.contains(oldCardLabels, label.name);
+        }),
+        '_id',
+      );
+
+      Object.assign(mutatedFields, {
+        labelIds: newCardLabelIds,
+      });
+
+      // Copy custom fields
       CustomFields.find({
         _id: {
           $in: this.customFields.map(cf => {
@@ -1118,33 +1361,6 @@ Cards.mutations({
         if (!_.contains(cf.boardIds, boardId)) cf.addBoard(boardId);
       });
     }
-
-    // Get label names
-    const oldBoard = Boards.findOne(this.boardId);
-    const oldBoardLabels = oldBoard.labels;
-    const oldCardLabels = _.pluck(
-      _.filter(oldBoardLabels, label => {
-        return _.contains(this.labelIds, label._id);
-      }),
-      'name',
-    );
-
-    const newBoard = Boards.findOne(boardId);
-    const newBoardLabels = newBoard.labels;
-    const newCardLabelIds = _.pluck(
-      _.filter(newBoardLabels, label => {
-        return label.name && _.contains(oldCardLabels, label.name);
-      }),
-      '_id',
-    );
-
-    const mutatedFields = {
-      boardId,
-      swimlaneId,
-      listId,
-      sort,
-      labelIds: newCardLabelIds,
-    };
 
     Cards.update(this._id, {
       $set: mutatedFields,
@@ -1195,11 +1411,25 @@ Cards.mutations({
   },
 
   assignAssignee(assigneeId) {
+    // If there is not any assignee, allow one assignee, not more.
+    /*
+    if (this.getAssignees().length === 0) {
+      return {
+        $addToSet: {
+          assignees: assigneeId,
+        },
+      };
+    */
+    // Allow more that one assignee:
+    // https://github.com/wekan/wekan/issues/3302
     return {
       $addToSet: {
         assignees: assigneeId,
       },
     };
+    //} else {
+    //  return false,
+    //}
   },
 
   unassignMember(memberId) {
@@ -1389,6 +1619,69 @@ Cards.mutations({
         parentId,
       },
     };
+  },
+  setVoteQuestion(question, publicVote, allowNonBoardMembers) {
+    return {
+      $set: {
+        vote: {
+          question,
+          public: publicVote,
+          allowNonBoardMembers,
+          positive: [],
+          negative: [],
+        },
+      },
+    };
+  },
+  unsetVote() {
+    return {
+      $unset: {
+        vote: '',
+      },
+    };
+  },
+  setVoteEnd(end) {
+    return {
+      $set: { 'vote.end': end },
+    };
+  },
+  unsetVoteEnd() {
+    return {
+      $unset: { 'vote.end': '' },
+    };
+  },
+  setVote(userId, forIt) {
+    switch (forIt) {
+      case true:
+        // vote for it
+        return {
+          $pull: {
+            'vote.negative': userId,
+          },
+          $addToSet: {
+            'vote.positive': userId,
+          },
+        };
+      case false:
+        // vote against
+        return {
+          $pull: {
+            'vote.positive': userId,
+          },
+          $addToSet: {
+            'vote.negative': userId,
+          },
+        };
+
+      default:
+        // Remove votes
+        return {
+          $pull: {
+            'vote.positive': userId,
+            'vote.negative': userId,
+          },
+        };
+    }
   },
 });
 
@@ -1908,6 +2201,11 @@ if (Meteor.isServer) {
             title: doc.title,
             description: doc.description,
             listId: doc.listId,
+            receivedAt: doc.receivedAt,
+            startAt: doc.startAt,
+            dueAt: doc.dueAt,
+            endAt: doc.endAt,
+            assignees: doc.assignees,
           };
         }),
       });
@@ -1944,6 +2242,11 @@ if (Meteor.isServer) {
           _id: doc._id,
           title: doc.title,
           description: doc.description,
+          receivedAt: doc.receivedAt,
+          startAt: doc.startAt,
+          dueAt: doc.dueAt,
+          endAt: doc.endAt,
+          assignees: doc.assignees,
         };
       }),
     });
@@ -1990,15 +2293,22 @@ if (Meteor.isServer) {
    * @param {string} description the description of the new card
    * @param {string} swimlaneId the swimlane ID of the new card
    * @param {string} [members] the member IDs list of the new card
-   * @param {string} [assignees] the assignee IDs list of the new card
+   * @param {string} [assignees] the array of maximum one ID of assignee of the new card
    * @return_type {_id: string}
    */
   JsonRoutes.add('POST', '/api/boards/:boardId/lists/:listId/cards', function(
     req,
     res,
   ) {
-    Authentication.checkUserId(req.userId);
+    // Check user is logged in
+    Authentication.checkLoggedIn(req.userId);
     const paramBoardId = req.params.boardId;
+    // Check user has permission to add card to the board
+    const board = Boards.findOne({
+      _id: paramBoardId,
+    });
+    const addPermission = allowIsBoardMemberCommentOnly(req.userId, board);
+    Authentication.checkAdminOrCondition(req.userId, addPermission);
     const paramListId = req.params.listId;
     const paramParentId = req.params.parentId;
     const currentCards = Cards.find(
@@ -2011,7 +2321,7 @@ if (Meteor.isServer) {
     const check = Users.findOne({
       _id: req.body.authorId,
     });
-    const members = req.body.members || [req.body.authorId];
+    const members = req.body.members;
     const assignees = req.body.assignees;
     if (typeof check !== 'undefined') {
       const id = Cards.direct.insert({
@@ -2076,7 +2386,7 @@ if (Meteor.isServer) {
    * @param {string} [labelIds] the new list of label IDs attached to the card
    * @param {string} [swimlaneId] the new swimlane ID of the card
    * @param {string} [members] the new list of member IDs attached to the card
-   * @param {string} [assignees] the new list of assignee IDs attached to the card
+   * @param {string} [assignees] the array of maximum one ID of assignee attached to the card
    * @param {string} [requestedBy] the new requestedBy field of the card
    * @param {string} [assignedBy] the new assignedBy field of the card
    * @param {string} [receivedAt] the new receivedAt field of the card
@@ -2088,6 +2398,10 @@ if (Meteor.isServer) {
    * @param {boolean} [isOverTime] the new isOverTime field of the card
    * @param {string} [customFields] the new customFields value of the card
    * @param {string} [color] the new color of the card
+   * @param {Object} [vote] the vote object
+   * @param {string} vote.question the vote question
+   * @param {boolean} vote.public show who voted what
+   * @param {boolean} vote.allowNonBoardMembers allow all logged in users to vote?
    * @return_type {_id: string}
    */
   JsonRoutes.add(
@@ -2113,34 +2427,6 @@ if (Meteor.isServer) {
               title: newTitle,
             },
           },
-        );
-      }
-      if (req.body.hasOwnProperty('listId')) {
-        const newParamListId = req.body.listId;
-        Cards.direct.update(
-          {
-            _id: paramCardId,
-            listId: paramListId,
-            boardId: paramBoardId,
-            archived: false,
-          },
-          {
-            $set: {
-              listId: newParamListId,
-            },
-          },
-        );
-
-        const card = Cards.findOne({
-          _id: paramCardId,
-        });
-        cardMove(
-          req.body.authorId,
-          card,
-          {
-            fieldName: 'listId',
-          },
-          paramListId,
         );
       }
       if (req.body.hasOwnProperty('parentId')) {
@@ -2185,6 +2471,24 @@ if (Meteor.isServer) {
             archived: false,
           },
           { $set: { color: newColor } },
+        );
+      }
+      if (req.body.hasOwnProperty('vote')) {
+        const newVote = req.body.vote;
+        newVote.positive = [];
+        newVote.negative = [];
+        if (!newVote.hasOwnProperty('public')) newVote.public = false;
+        if (!newVote.hasOwnProperty('allowNonBoardMembers'))
+          newVote.allowNonBoardMembers = false;
+
+        Cards.direct.update(
+          {
+            _id: paramCardId,
+            listId: paramListId,
+            boardId: paramBoardId,
+            archived: false,
+          },
+          { $set: { vote: newVote } },
         );
       }
       if (req.body.hasOwnProperty('labelIds')) {
@@ -2368,6 +2672,34 @@ if (Meteor.isServer) {
           { $set: { swimlaneId: newParamSwimlaneId } },
         );
       }
+      if (req.body.hasOwnProperty('listId')) {
+        const newParamListId = req.body.listId;
+        Cards.direct.update(
+          {
+            _id: paramCardId,
+            listId: paramListId,
+            boardId: paramBoardId,
+            archived: false,
+          },
+          {
+            $set: {
+              listId: newParamListId,
+            },
+          },
+        );
+
+        const card = Cards.findOne({
+          _id: paramCardId,
+        });
+        cardMove(
+          req.body.authorId,
+          card,
+          {
+            fieldName: 'listId',
+          },
+          paramListId,
+        );
+      }
       JsonRoutes.sendResult(res, {
         code: 200,
         data: {
@@ -2398,13 +2730,13 @@ if (Meteor.isServer) {
       const paramListId = req.params.listId;
       const paramCardId = req.params.cardId;
 
+      const card = Cards.findOne({
+        _id: paramCardId,
+      });
       Cards.direct.remove({
         _id: paramCardId,
         listId: paramListId,
         boardId: paramBoardId,
-      });
-      const card = Cards.find({
-        _id: paramCardId,
       });
       cardRemover(req.body.authorId, card);
       JsonRoutes.sendResult(res, {
@@ -2412,6 +2744,44 @@ if (Meteor.isServer) {
         data: {
           _id: paramCardId,
         },
+      });
+    },
+  );
+
+  /**
+   * @operation get_cards_by_custom_field
+   * @summary Get all Cards that matchs a value of a specific custom field
+   *
+   * @param {string} boardId the board ID
+   * @param {string} customFieldId the list ID
+   * @param {string} customFieldValue the value to look for
+   * @return_type [{_id: string,
+   *                title: string,
+   *                description: string,
+   *                listId: string,
+   *                swinlaneId: string}]
+   */
+  JsonRoutes.add(
+    'GET',
+    '/api/boards/:boardId/cardsByCustomField/:customFieldId/:customFieldValue',
+    function(req, res) {
+      const paramBoardId = req.params.boardId;
+      const paramCustomFieldId = req.params.customFieldId;
+      const paramCustomFieldValue = req.params.customFieldValue;
+
+      Authentication.checkBoardAccess(req.userId, paramBoardId);
+      JsonRoutes.sendResult(res, {
+        code: 200,
+        data: Cards.find({
+          boardId: paramBoardId,
+          customFields: {
+            $elemMatch: {
+              _id: paramCustomFieldId,
+              value: paramCustomFieldValue,
+            },
+          },
+          archived: false,
+        }).fetch(),
       });
     },
   );

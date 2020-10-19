@@ -48,7 +48,7 @@ BlazeComponent.extendComponent({
         'members.isAdmin': true,
       },
       {
-        sort: ['title'],
+        sort: { sort: 1 /* boards default sorting */ },
       },
     );
   },
@@ -167,24 +167,40 @@ BlazeComponent.extendComponent({
     const productName = $('#product-name')
       .val()
       .trim();
+    const customLoginLogoImageUrl = $('#custom-login-logo-image-url')
+      .val()
+      .trim();
+    const customLoginLogoLinkUrl = $('#custom-login-logo-link-url')
+      .val()
+      .trim();
+    const textBelowCustomLoginLogo = $('#text-below-custom-login-logo')
+      .val()
+      .trim();
+    const customTopLeftCornerLogoImageUrl = $(
+      '#custom-top-left-corner-logo-image-url',
+    )
+      .val()
+      .trim();
+    const customTopLeftCornerLogoLinkUrl = $(
+      '#custom-top-left-corner-logo-link-url',
+    )
+      .val()
+      .trim();
     const hideLogoChange = $('input[name=hideLogo]:checked').val() === 'true';
     const displayAuthenticationMethod =
       $('input[name=displayAuthenticationMethod]:checked').val() === 'true';
     const defaultAuthenticationMethod = $('#defaultAuthenticationMethod').val();
-    const customHTMLafterBodyStart = $('#customHTMLafterBodyStart')
-      .val()
-      .trim();
-    const customHTMLbeforeBodyEnd = $('#customHTMLbeforeBodyEnd')
-      .val()
-      .trim();
 
     try {
       Settings.update(Settings.findOne()._id, {
         $set: {
           productName,
           hideLogo: hideLogoChange,
-          customHTMLafterBodyStart,
-          customHTMLbeforeBodyEnd,
+          customLoginLogoImageUrl,
+          customLoginLogoLinkUrl,
+          textBelowCustomLoginLogo,
+          customTopLeftCornerLogoImageUrl,
+          customTopLeftCornerLogoLinkUrl,
           displayAuthenticationMethod,
           defaultAuthenticationMethod,
         },

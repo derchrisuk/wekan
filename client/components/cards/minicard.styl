@@ -79,7 +79,7 @@
     border-radius: top 2px
 
   .minicard-labels
-    float: right
+    float: none
     display: flex
     flex-wrap: wrap
 
@@ -87,7 +87,9 @@
       width: 11px
       height: @width
       border-radius: 2px
-      margin-left: 3px
+      margin-right: 3px
+      margin-bottom: 3px
+      
   .minicard-custom-fields
     display:block;
   .minicard-custom-field
@@ -160,11 +162,18 @@
         padding-left: 0px
         line-height: 12px
 
-  .minicard-members
+  .minicard-members,
+  .minicard-assignees
     float: right
-    margin: 2px -8px -2px 0
+    margin: 2px -8px 12px 0
 
     .member
+      float: right
+      border-radius: 50%
+      height: 28px
+      width: @height
+
+    .assignee
       float: right
       border-radius: 50%
       height: 28px
@@ -173,7 +182,8 @@
     + .badges
       margin-top: 10px
 
-  .minicard-members:empty
+  .minicard-members:empty,
+  .minicard-assignees:empty
     display: none
 
   &.minicard-composer
@@ -291,3 +301,8 @@ minicard-color(background, color...)
 
 .minicard-indigo
   minicard-color(#4b0082, #ffffff) //White text for better visibility
+
+.text-red
+  color:red
+.text-green
+  color:green
